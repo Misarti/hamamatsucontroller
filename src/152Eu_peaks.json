@@ -1,0 +1,24 @@
+{
+  "meta_data": "Peaks of 152Eu spectrum measured with compressor-cooled Germanium gamma spectroscopy detector of HISKP P5 room with approx. 20 cm distance between detector and source. Literature values for energy in keV from http://nucleardata.nuclear.lu.se/toi/radSearch.asp (11.07.2018)",
+  "energy": {
+    "152_Eu_0": 121.78,
+    "152_Eu_1": 344.24,
+    "152_Eu_2": 1408.01,
+    "152_Eu_3": 964.08,
+    "152_Eu_4": 1112.07,
+    "152_Eu_5": 778.9,
+    "152_Eu_6": 1085.87,
+    "152_Eu_7": 244.7
+  },
+  "channel": {
+    "152_Eu_0": 592,
+    "152_Eu_1": 1716.5,
+    "152_Eu_2": 7086.5,
+    "152_Eu_3": 4845,
+    "152_Eu_4": 5593,
+    "152_Eu_5": 3909,
+    "152_Eu_6": 5460,
+    "152_Eu_7": 1214,
+    "Am_L_g1": 22.0652
+  }
+}

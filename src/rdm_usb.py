@@ -1,14 +1,16 @@
 import ctypes
 import os
+import random
+
 import coloredlogs, logging
 from dataclasses import dataclass
 from dataclasses_json import dataclass_json
+from pathlib import Path
 import numpy as np
 import bisect
-import matplotlib
-import matplotlib.pyplot as plt
 import csv
-import time
+import yaml
+import json
 
 @dataclass_json
 @dataclass
@@ -44,7 +46,7 @@ class RdmUsbModule:
         logging.basicConfig()
         self.logger = logging.getLogger('RdmUsb')
         coloredlogs.install(level='INFO', logger=self.logger)
-        #self.invalid_handle_value = -1
+        self.invalid_handle_value = -1
         self.eeprom = Eeprom(comp_level=10,
                              energy_lower=12,
                              energy_upper=14,
@@ -59,17 +61,21 @@ class RdmUsbModule:
         self.device_handle = self.open_device()
         self.energy, self.base_sievert, self.base_energy = self.eeprom_info()
         self.count_rate = 0
-        self.histsave = np.empty((65535))
-        self.histgraph = np.empty((4096))
         self.log_listX, self.log_corr = self.get_log_corr()
         self.area_lower = bisect.bisect_left(self.log_listX, self.energy.area_start.value)
         self.area_upper = bisect.bisect_right(self.log_listX, self.energy.area_end.value)
         self.sievert = 0
         self.sievert_array = []
         self.event_count = 0
+        self.histsave = np.zeros(65535)
+        self.histogram = np.zeros(4096)
 
 
     def get_functions(self):
+        """
+        Method to get library of basic functions from rdmusb.dll
+        :return: library object
+        """
         file_path = os.path.abspath("./res/rdmusb.dll")
         lib = ctypes.WinDLL(file_path)
         return lib
@@ -133,8 +139,8 @@ class RdmUsbModule:
                 log_corr.append(float(row[1]))
         return log_listX, log_corr
 
-    def sievert_per_sec(self, sievert):
-        sievert_per_sec = sievert * 0.0036
+    def sievert_per_sec(self):
+        sievert_per_sec = self.sievert * 0.0036
         self.sievert_array.append(sievert_per_sec)
         mean = sum(self.sievert_array)/len(self.sievert_array)
         result = mean * self.base_sievert.value
@@ -148,21 +154,41 @@ class RdmUsbModule:
         buffer = [buffer_inside]*1048
         arr = seq(*buffer)
         temperature = ctypes.c_double()
-        result = self.lib.RdmUsb_GetDacDataAndTemperature(self.device_handle, ctypes.byref(size), arr,
-                                                          ctypes.byref(index), ctypes.byref(temperature))
+        self.lib.RdmUsb_GetDacDataAndTemperature(self.device_handle, ctypes.byref(size), arr,
+                                                 ctypes.byref(index), ctypes.byref(temperature))
         self.event_count +=1
         if size != 0:
+            self.count_rate += size.value
             for i in range(size.value):
-                self.count_rate += size.value
                 addr = arr[i]
                 self.histsave[addr] += 1
                 binary_shift_addr = addr >> 4
-                self.histgraph[binary_shift_addr] += 1
+                self.histogram[binary_shift_addr] +=1
                 if self.area_lower < binary_shift_addr < self.area_upper:
                     self.sievert += self.log_corr[binary_shift_addr]
+
         if self.event_count % 10 == 0:
-            self.sievert_per_sec(self.sievert)
+            self.count_rate = 0
+            self.sievert_per_sec()
             self.sievert = 0
+
+    def find_peaks(self):
+        print(max(self.histogram))
+
+    def save_measurements(self):
+        script_path = Path(__file__).parent.parent.absolute()
+        filename = f'meas.txt'
+        file_path = Path(script_path, 'res', filename).resolve()
+        with open(file_path, 'w') as f:
+            for i in range(len(self.log_listX)):
+                f.writelines(str(i)+'\t')
+                f.write(str(self.histogram[i]))
+                f.write('\n')
+
+
+
+
+
 
 
 
