@@ -1,7 +1,8 @@
 import ctypes
 import os
 import random
-
+from os import path
+from scipy.signal import argrelmax, find_peaks
 import coloredlogs, logging
 from dataclasses import dataclass
 from dataclasses_json import dataclass_json
@@ -9,8 +10,6 @@ from pathlib import Path
 import numpy as np
 import bisect
 import csv
-import yaml
-import json
 
 @dataclass_json
 @dataclass
@@ -93,6 +92,12 @@ class RdmUsbModule:
         self.logger.info('Device disconnected')
 
     def get_info_from_eeprom(self, parameter, data):
+        """
+        General method to get each type of energy parameter and return data by reference
+        :param parameter:
+        :param data:
+        :return:
+        """
         read = self.lib.RdmUsb_ReadEeprom
         result = read(self.device_handle, parameter, ctypes.byref(data))
 
@@ -114,8 +119,12 @@ class RdmUsbModule:
 
         return energy, d_base_siev, d_base_ener
 
-    def energy_threshold(self):
-        energy_threshold = ctypes.c_ushort(15)
+    def energy_threshold(self) -> ctypes.c_ushort:
+        """
+        Get current energy_threshold from sensor
+        :return: ctypes.c_ushort
+        """
+        energy_threshold = ctypes.c_ushort()
         self.lib.RdmUsb_GetEnergyThreshold(self.device_handle, ctypes.byref(energy_threshold))
         return energy_threshold
 
@@ -129,6 +138,10 @@ class RdmUsbModule:
         print('Major', major)
 
     def get_log_corr(self):
+        """
+        Creates tables for energy calibration with corrections
+        :return:
+        """
         file_path =  "./res/gf_C12137_2.csv"
         log_listX = []
         log_corr = []
@@ -140,6 +153,10 @@ class RdmUsbModule:
         return log_listX, log_corr
 
     def sievert_per_sec(self):
+        """
+        Calculates mean sievert per sec value
+        :return:
+        """
         sievert_per_sec = self.sievert * 0.0036
         self.sievert_array.append(sievert_per_sec)
         mean = sum(self.sievert_array)/len(self.sievert_array)
@@ -147,6 +164,10 @@ class RdmUsbModule:
         print(result)
 
     def get_dac(self):
+        """
+        Method to get input from the sensor by reference
+        :return:
+        """
         index = ctypes.c_ushort()
         buffer_inside = ctypes.c_ushort()
         size = ctypes.c_ushort()
@@ -173,7 +194,17 @@ class RdmUsbModule:
             self.sievert = 0
 
     def find_peaks(self):
-        print(max(self.histogram))
+        #peaks = find_peaks(self.histogram)
+        peaks = argrelmax(self.histogram, order=50, mode='clip')
+        n_peaks = len(peaks)
+        print(n_peaks)
+        for peak in peaks:
+            peak_energy = [self.log_listX[p] for p in peak]
+        peak_energy_path = path.abspath("./res/peaks.csv")
+        with open(peak_energy_path, 'w') as f:
+            writer = csv.writer(f)
+            # write a row to the csv file
+            writer.writerow(peak_energy)
 
     def save_measurements(self):
         script_path = Path(__file__).parent.parent.absolute()
@@ -181,7 +212,7 @@ class RdmUsbModule:
         file_path = Path(script_path, 'res', filename).resolve()
         with open(file_path, 'w') as f:
             for i in range(len(self.log_listX)):
-                f.writelines(str(i)+'\t')
+                f.writelines(str(self.log_listX[i])+'\t')
                 f.write(str(self.histogram[i]))
                 f.write('\n')
 
