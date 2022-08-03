@@ -10,7 +10,6 @@ from pathlib import Path
 
 if __name__ == "__main__":
     n = NuclideIdentifier()
-    n.find_peaks()
     rdm = RdmUsbModule()
     for i in range(1000):
         rdm.get_dac()
