@@ -22,7 +22,7 @@ class NuclideIdentifier:
         self.sample = self.read_sample()
         self.energy_values = self.get_energy_values()
         #self.peaks = self.find_peaks()
-        self.database_array, self.database_dict, self.nuc_dic_irrad = self.get_database()
+        self.database_array, self.database_dict, self.nuc_dic_irrad, self.nuc_dic_irrad_prob = self.get_database()
         self.peaks = self.interpolate_bkg(self.sample)
         self.identify_nuclide()
 
@@ -37,6 +37,40 @@ class NuclideIdentifier:
 
     def gauss_general(self, x, mu, sigma, n, h):
         return h * np.exp(-np.power((x - mu) / sigma, n))
+
+    def get_activity(self, observed_peaks, probability_peaks=None):
+        """
+        Method to calculate activity isotope-wise. The peak-wise activities of all peaks of
+        each isotope are added and scaled with their respectively summed-up probability
+        """
+        activities = OrderedDict()
+        probability_peaks = self.nuc_dic_irrad_prob
+
+        for peak in observed_peaks:
+            isotope = '_'.join(peak.split('_')[:-1])
+            if isotope not in activities:
+                activities[isotope] = OrderedDict([('nominal', 0), ('sigma', 0),
+                                                   ('probability', 0), ('unscaled', {'nominal': 0, 'sigma': 0})])
+                activities[isotope]['unscaled']['nominal'] = 0
+
+            if peak in probability_peaks:
+                print('PROBABILITY', probability_peaks[peak])
+                activities[isotope]['unscaled']['nominal'] += observed_peaks[peak]['activity']['nominal']
+                # squared sum in order to get Gaussian error propagation right
+                activities[isotope]['unscaled']['sigma'] += observed_peaks[peak]['activity']['sigma'] ** 2
+                activities[isotope]['probability'] += probability_peaks[peak]
+
+        for iso in activities:
+            try:
+                activities[iso]['nominal'] = activities[iso]['unscaled']['nominal'] * 1. / activities[iso]['probability']
+                # square root of sum of squared sigmas in order to get Gaussian error propagation right
+                activities[iso]['sigma'] = activities[iso]['unscaled']['sigma'] ** 0.5 * 1. / activities[iso]['probability']
+
+            # when no probability given
+            except ZeroDivisionError:
+                pass
+
+        return activities
 
     def interpolate_bkg(self, counts, channels=None, window=5, order=3, scale=0.5, energy_cal=None):
         """
@@ -181,6 +215,7 @@ class NuclideIdentifier:
         expected_peaks = {}
         for candidate in self.nuc_dic_irrad.keys():
             for energies in self.nuc_dic_irrad[candidate]:
+                print('ENERGIEs', energies)
                 expected_peaks[candidate] = energies
         filtered = {k: v for k, v in expected_peaks.items() if v != []}
         expected_peaks.clear()
@@ -565,6 +600,12 @@ class NuclideIdentifier:
                     peaks[peak_name]['peak_fit']['int_lims'] = [float(low_lim), float(high_lim)]
                     peaks[peak_name]['peak_fit']['type'] = peak_fit.__name__
 
+                    peaks[peak_name]['activity']['nominal'] = float(activity)
+                    peaks[peak_name]['activity']['sigma'] = float(activity_err)
+                    peaks[peak_name]['activity']['type'] = 'integrated' if t_spec is None else 'normalized'
+                    peaks[peak_name]['activity']['unit'] = 'becquerel' if t_spec is not None else 'counts / t_spec'
+                    peaks[peak_name]['activity']['calibrated'] = efficiency_cal is not None
+
 
                     counter += 1  # increase counter
 
@@ -574,8 +615,12 @@ class NuclideIdentifier:
                 #current_mask = (low_lim <= _chnnls) & (_chnnls <= high_lim)
                 current_mask = [True if (low_lim <= _chnnls[i]) & (_chnnls[i] <= high_lim) else False for i in range(len(_chnnls))]
                 peak_mask[current_mask] = peak_mask_fitted[current_mask] = False
+        activities = self.get_activity(peaks)
+        print(activities)
 
-        print([peak for peak in peaks])
+        for peak in peaks:
+            print(peak)
+            print(peaks[peak]['peak_fit']['popt'][0])
         peaks = []
         for idx, y in enumerate(y_find_peaks):
             mean =  np.mean(y_find_peaks[idx-15:idx+15])
@@ -626,6 +671,7 @@ class NuclideIdentifier:
         #nuclides dictionary in a easier form for later calculations
         nuclides_dict = {}
         nuc_dic_irrad = {}
+        nuc_dic_irrad_prob = {}
         for nuclide in database:
             energy_peaks = []
             intensity = []
@@ -635,8 +681,9 @@ class NuclideIdentifier:
                 new_database.append([nuclide, peaks['energy'], peaks['intensity']])
             nuclides_dict[nuclide] = [energy_peaks, intensity]
             nuc_dic_irrad[nuclide] = energy_peaks
+            nuc_dic_irrad_prob[nuclide] = intensity
         new_database = np.array(new_database)
-        return new_database, nuclides_dict, nuc_dic_irrad
+        return new_database, nuclides_dict, nuc_dic_irrad, nuc_dic_irrad_prob
 
     def get_database(self):
         x = requests.get('http://25.20.235.8:8000/lhnb/list')
@@ -646,8 +693,8 @@ class NuclideIdentifier:
             r = requests.get(f'http://25.20.235.8:8000/lhnb/nuclide/{nuclide}')
             nuclide_info = r.json()
             nuclides_peaks[nuclide] = nuclide_info['spectra_peaks']
-        new_database_array, new_database_dict, nuc_dic_irrad = self.reform_database(nuclides_peaks)
-        return new_database_array, new_database_dict, nuc_dic_irrad
+        new_database_array, new_database_dict, nuc_dic_irrad, nuc_dic_irrad_prob = self.reform_database(nuclides_peaks)
+        return new_database_array, new_database_dict, nuc_dic_irrad, nuc_dic_irrad_prob
 
 
     def check_candidate(self, candidate):
