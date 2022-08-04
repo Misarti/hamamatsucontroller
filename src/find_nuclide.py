@@ -2,15 +2,17 @@ from os import path
 import csv
 import numpy as np
 import requests
+import logging
 from scipy.interpolate import interp1d
+import warnings
 from scipy.signal import argrelmax, argrelextrema
 from collections import OrderedDict, Iterable
-from scipy.optimize import curve_fit, fsolve
+from scipy.optimize import curve_fit, fsolve, OptimizeWarning
 from scipy.integrate import quad
 import inspect
 
-def lin(x, a, b):
-    return a * x + b
+def lin(x, a):
+    return a * x
 
 def gauss(x, mu, sigma, h):
     return h * np.exp(-0.5 * np.power((x - mu) / sigma, 2.))
@@ -82,7 +84,7 @@ class NuclideIdentifier:
             _chnnls = channels[:]
 
         # calibrate channels if a calibration is given
-        _chnnls = _chnnls if energy_cal is None else energy_cal(_chnnls)
+        _chnnls = _chnnls
 
         # get slopes of spectrum
         dy = np.diff(_cnts)
@@ -106,8 +108,10 @@ class NuclideIdentifier:
             bkg_mask = np.append(np.abs(dy_mv_avg) <= scale * np.mean(np.abs(dy_mv_avg)), np.array([0], dtype=np.bool))
 
             # interpolate the masked array into array, then create function and append to estimates
+            bkg_chnnls = [_chnnls[i] for i in range(len(_chnnls)) if bkg_mask[i]]
+            bkg_counts = [_cnts[i] for i in range(len(_cnts)) if bkg_mask[i]]
             bkg_estimates.append(
-                interp1d(_chnnls, np.interp(_chnnls, _chnnls[bkg_mask], _cnts[bkg_mask]), kind='quadratic'))
+                interp1d(_chnnls, np.interp(_chnnls, bkg_chnnls, bkg_counts), kind='quadratic'))
 
             # mask wherever signal and bkg are 0
             zero_mask = ~(np.isclose(_cnts, 0) & np.isclose(bkg_estimates[o](_chnnls), 0))
@@ -146,6 +150,24 @@ class NuclideIdentifier:
 
         # result dict
         peaks = OrderedDict()
+        t_spec = None
+        peak_fit = gauss
+        ch_sigma = 5
+        energy_range = None
+        logging.getLogger().setLevel(logging.DEBUG)
+        local_bkg = True
+        n_peaks = None
+        efficiency_cal = None
+        expected_accuracy = 0.01
+        reliable = False
+        _chnnls = np.asarray(self.get_energy_values())
+
+
+        # ignore scipy throwing warnings
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
+        warnings.filterwarnings("ignore", category=OptimizeWarning)
+
+
 
         # boolean masks
         # masking regions due to failing general conditions (peak_mask)
@@ -163,21 +185,51 @@ class NuclideIdentifier:
         filtered = {k: v for k, v in expected_peaks.items() if v != []}
         expected_peaks.clear()
         expected_peaks.update(filtered)
-        print(expected_peaks)
 
         tmp_n_peaks = total_n_peaks = len(expected_peaks)
 
-            # make channel sigma iterable if not already iterable
-        ch_sigma = 5
+        # make channel sigma iterable if not already iterable
         if not isinstance(ch_sigma, Iterable):
             ch_sigma = [ch_sigma] * total_n_peaks
         else:
             if len(ch_sigma) != total_n_peaks:
                 raise IndexError('Not enough channel sigmas for number of peaks')
 
-        def tmp_fit(x, *args):
-            return gauss(x, *args)
+        # check whether energy range cut should be applied for finding peaks
+        if energy_range:
+            _e_msg = None
+            if energy_cal is None:
+                _e_msg = 'No energy calibration provided. Setting an energy range has no effect.'
+            else:
+                # one range specified
+                if isinstance(energy_range, Iterable) and not isinstance(energy_range[0], Iterable):
+                    if len(energy_range) == 2:
+                        _e_range_mask = (_chnnls <= energy_range[0]) | (_chnnls >= energy_range[1])
+                        peak_mask[_e_range_mask] = peak_mask_fitted[_e_range_mask] = False
+                    else:
+                        _e_msg = 'Energy range {} must contain two elements of lower/upper limit.'.format(energy_range)
+                # multiple energy sections specified; invert bool masks and set all specified ranges True
+                elif isinstance(energy_range, Iterable) and isinstance(energy_range[0], Iterable):
+                    if all(len(er) == 2 for er in energy_range):
+                        peak_mask, peak_mask_fitted = ~peak_mask, ~peak_mask_fitted
+                        for e_section in energy_range:
+                            _e_sec_mask = (e_section[0] <= _chnnls) & (_chnnls <= e_section[1])
+                            peak_mask[_e_sec_mask] = peak_mask_fitted[_e_sec_mask] = True
+                    else:
+                        _e_msg = 'Each element of {} must contain two elements of lower/upper limit.'.format(
+                            energy_range)
+                else:
+                    _e_msg = 'Energy range {} must be an iterable of size two. No range set.'.format(energy_range)
+            if _e_msg:
+                logging.warning(_e_msg)
 
+        # define tmp fit function of peak: either just gauss or gauss plus background
+        def tmp_fit(x, *args):
+            return peak_fit(x, *args) if local_bkg else peak_fit(x, *args) + _bkg(x)
+
+        logging.info('Start fitting...')
+
+        # loop over tmp_n_peaks
         while counter < tmp_n_peaks:
 
             # try to find the expected peaks by going through _MAX_PEAKS peaks in spectrum
@@ -190,12 +242,21 @@ class NuclideIdentifier:
                             runtime_msg += ', '.join(missing_peaks) + ' missing! '
                         else:
                             runtime_msg += 'Number of lines not found in spectrum: {}'.format(len(missing_peaks))
-                    print(runtime_msg)
+                    logging.warning(runtime_msg)
+
                     # check expected peaks first; then reset and look for another n_peaks
+                    if n_peaks is not None:
+                        msg = 'Finding additional %i peaks ...' % n_peaks
+                        counter = 0
+                        runtime_counter = 0
+                        tmp_n_peaks = n_peaks
+                        checked_expected = True
+                        peak_mask = peak_mask_fitted
+                        logging.info(msg)
+                        continue
                 else:
                     print(runtime_msg)
                 break
-
 
             runtime_counter += 1
 
@@ -212,45 +273,53 @@ class NuclideIdentifier:
                             msg += ', '.join(missing_peaks) + ' missing! '
                         else:
                             msg += 'Number of lines not found in spectrum: {}'.format(len(missing_peaks))
+                if n_peaks is not None:
+                    msg += '' if counter == tmp_n_peaks else '{} of {} peaks found.'.format(counter, tmp_n_peaks)
+                logging.info(msg)
                 break
 
             # get corresponding channel numbers: MULTIPLE X FOR SAME Y POSSIBLE BUT RARE! NEED TO LOOP
             x_peaks = np.where(y_peak == y_find_peaks)[0]
+            energy_values = self.get_energy_values()
 
             # loop over possibly multiple x peak positions
             for x_peak in x_peaks:
-                print(x_peaks)
+
                 # make fit environment; fit around x_peak +- some ch_sigma
                 # make tmp_peak for whether we're fitting channels or already calibrated channels
-                tmp_peak = x_peak if energy_cal is None else np.where(_chnnls == energy_cal(x_peak))[0][0]
+                tmp_peak = np.where(np.isclose(_chnnls,energy_values[x_peak]))[0][0]
                 low = tmp_peak - ch_sigma[counter] if tmp_peak - ch_sigma[counter] > 0 else 0
                 high = tmp_peak + ch_sigma[counter] if tmp_peak + ch_sigma[counter] < len(_chnnls) else len(_chnnls) - 1
 
                 # make fit regions in x and y; a little confusing to look at but we need the double indexing to
                 # obtain the same shapes
-                x_fit, y_fit = _chnnls[low:high][peak_mask[low:high]], _cnts[low:high][peak_mask[low:high]]
+                x_fit = [_chnnls[i] for i in range(low, high+1) if peak_mask[i]]
+                y_fit = [_cnts[i] for i in range(low, high+1) if peak_mask[i]]
+                #x_fit, y_fit = _chnnls[low:high][peak_mask[low:high]], _cnts[low:high][peak_mask[low:high]]
 
                 # check whether we have enough points to fit to
                 if len(x_fit) < 5:  # skip less than 5 data points
-                    print('Only %i data points in fit region. Skipping' % len(x_fit))
+                    logging.debug('Only %i data points in fit region. Skipping' % len(x_fit))
                     peak_mask[low:high] = False
                     continue
 
                 # start fitting
                 try:
                     # estimate starting parameters
-                    _mu = x_peak if energy_cal is None else energy_cal(x_peak)
+                    _mu = energy_values[x_peak]
+                    print(x_peak, _mu)
                     _sigma = 0
                     k = 2.0
                     while _sigma == 0 and k <= 10:
                         try:
-                            _sigma = np.abs(x_fit[y_fit >= y_peak / k][-1] - x_fit[y_fit >= y_peak / k][0]) / 2.3548
+                            sigma_x_fit = [x_fit[i] for i in range(len(x_fit)) if y_fit[i] >= y_peak / k]
+                            _sigma = np.abs(sigma_x_fit[-1] - sigma_x_fit[0]) / 2.3548
                         except IndexError:
                             pass
                         finally:
                             k += .5
                     _p0 = {'mu': _mu, 'sigma': _sigma, 'h': y_peak}
-                    fit_args = inspect.getargspec(gauss)[0][1:]
+                    fit_args = inspect.getargspec(peak_fit)[0][1:]
                     p0 = tuple(_p0[arg] if arg in _p0 else 1 for arg in fit_args)
                     popt, pcov = curve_fit(tmp_fit, x_fit, y_fit, p0=p0, sigma=np.sqrt(y_fit), absolute_sigma=True,
                                            maxfev=5000)
@@ -258,12 +327,39 @@ class NuclideIdentifier:
 
                     # update
                     _mu, _sigma = [popt[fit_args.index(par)] for par in ('mu', 'sigma')]
-                    # if fit is indistinguishable from background
+                    print( '_mu, sigma', _mu, _sigma)
+
+                    # if fitting resulted in nan errors
+                    if any(np.isnan(perr)):
+                        peak_mask[low:high] = False
+                        print('Fitted resulted in nan errors')
+                        continue
+
+                    if any(_mu == peaks[p]['peak_fit']['popt'][0] for p in peaks):
+                        logging.debug('Peak at %.2f already fitted. Skipping' % _mu)
+                        peak_mask[low:high] = False
+                        continue
+
+                    # if fit is unreliable
+                    if any(np.abs(perr / popt) > 1.0):
+                        print(perr/popt)
+                        if not reliable:
+                            logging.warning(
+                                'Unreliable fit for peak at %.2f. Uncertainties larger than 100 percent.' % _mu)
+                        else:
+                            logging.debug('Skipping fit for peak at %.2f. Uncertainties larger than 100 percent.' % _mu)
+                            peak_mask[low:high] = False
+                            continue
+
+                    #if fit is indistinguishable from background
                     try:
-                        _msk = ((_mu - 6 * _sigma <= _chnnls) & (_chnnls <= _mu - 3 * _sigma)) | \
-                               ((_mu + 3 * _sigma <= _chnnls) & (_chnnls <= _mu + 6 * _sigma))
+                        _msk = ((_mu - 10 * _sigma <= _chnnls) & (_chnnls <= _mu - 5 * _sigma)) | \
+                               ((_mu + 5 * _sigma <= _chnnls) & (_chnnls <= _mu + 10 * _sigma))
                         _msk[~peak_mask_fitted] = False
                         if np.max(_cnts[_msk]) > popt[fit_args.index('h')]:
+                            print(np.max(_cnts[_msk]))
+                            print(popt[fit_args.index('h')])
+                            logging.debug('Peak at %.2f indistinguishable from background. Skipping' % _mu)
                             print('Peak at %.2f indistinguishable from background. Skipping' % _mu)
                             raise ValueError
                     except ValueError:
@@ -272,12 +368,12 @@ class NuclideIdentifier:
 
                 # fitting did not succeed
                 except RuntimeError:  # disable failed region for next iteration
-                    print('Fitting failed. Skipping peak at %.2f' % _mu)
+                    logging.debug('Fitting failed. Skipping peak at %.2f' % _mu)
                     peak_mask[low:high] = False
                     continue
+
+                # check if our fitted peak is expected
                 if expected_peaks is not None and not checked_expected:
-                    print('I am here!')
-                    expected_accuracy = 0.005
 
                     # make list for potential candidates
                     candidates = []
@@ -285,31 +381,43 @@ class NuclideIdentifier:
                     # loop over all expected peaks and check which check out as expected within the accuracy
                     for ep in expected_peaks:
 
+
                         # get upper and lower estimates
                         lower_est, upper_est = [(1 + sgn * expected_accuracy) * expected_peaks[ep] for sgn in (-1, 1)]
-
+                        if ep == 'Cs-137':
+                            print(ep, 'LOWER MU UPPER', lower_est, _mu, upper_est)
+                        if ep == "Co-60":
+                            print('CANDIDATES', candidates)
                         # if current peak checks out set peak name and break
                         if lower_est <= _mu <= upper_est:
                             candidates.append(ep)
-                    print(candidates)
+                            print('CANDIDATES', candidates)
 
                     # if no candidates are found, current peak was not expected
                     if not candidates:
-                        print('Peak at %.2f not expected. Skipping' % _mu)
+                        logging.debug('Peak at %.2f not expected. Skipping' % _mu)
                         peak_mask[low:high] = False
                         continue
 
                     # if all candidates are already found
                     if all(c in peaks for c in candidates):
-                        print('Peak at %.2f already fitted. Skipping' % _mu)
+                        logging.debug('Peak at %.2f already fitted. Skipping' % _mu)
                         peak_mask[x_peak] = False
                         continue
                 else:
-                    print('I am here!')
                     candidates = ['peak_%i' % counter]
-                    # get integration limits within 3 sigma for non local background
-                    low_lim, high_lim = _mu - 3 * _sigma, _mu + 3 * _sigma  # integrate within 3 sigma
 
+                ### FROM HERE ON THE FITTED PEAK WILL BE IN THE RESULT DICT ###
+
+                # get integration limits within 3 sigma for non local background
+                low_lim, high_lim = _mu - 3 * _sigma, _mu + 3 * _sigma  # integrate within 3 sigma
+
+                # get background via integration of background model
+                if not local_bkg:
+                    background = quad(_bkg, low_lim, high_lim)  # background integration
+
+                # get local background and update limits
+                else:
                     # find local background bounds; start looking at bkg from (+-3 to +-6) sigma
                     # increase bkg to left/right of peak until to avoid influence of nearby peaks
                     _i_dev = 6
@@ -317,8 +425,8 @@ class NuclideIdentifier:
                     while _i_dev < int(_MAX_PEAKS / 2):
                         # Make tmp array of mean bkg values left and right of peak
                         _tmp_dev_array = [
-                        np.mean(_cnts[(_mu - _i_dev * _sigma <= _chnnls) & (_chnnls <= _mu - 3 * _sigma)]),
-                        np.mean(_cnts[(_mu + 3 * _sigma <= _chnnls) & (_chnnls <= _mu + _i_dev * _sigma)])]
+                            np.mean(_cnts[(_mu - _i_dev * _sigma <= _chnnls) & (_chnnls <= _mu - 3 * _sigma)]),
+                            np.mean(_cnts[(_mu + 3 * _sigma <= _chnnls) & (_chnnls <= _mu + _i_dev * _sigma)])]
                         # look at std. deviation; as long as it decreases for increasing bkg area update
                         if _deviation is None or np.std(_tmp_dev_array) < _deviation:
                             _deviation = np.std(_tmp_dev_array)
@@ -329,115 +437,154 @@ class NuclideIdentifier:
                         # increment
                         _i_dev += 1
 
-                        # get background from 3 to _i_dev sigma left of peak
-                        lower_bkg = np.logical_and(_mu - _i_dev * _sigma <= _chnnls, _chnnls <= _mu - 3 * _sigma)
-                        # get background from 3 to _i_dev sigma right of peak
-                        upper_bkg = np.logical_and(_mu + 3 * _sigma <= _chnnls, _chnnls <= _mu + _i_dev * _sigma)
-                        # combine bool mask
-                        bkg_mask = np.logical_or(lower_bkg, upper_bkg)
-                        # mask other peaks in bkg so local background fit will not be influenced by nearby peak
-                        bkg_mask[~peak_mask] = False
-                        # do fit; make sure we don't mask at least 2 points
-                        if np.count_nonzero(bkg_mask) > 1:
-                            bkg_opt, bkg_cov = curve_fit(lin, _chnnls[bkg_mask], _cnts[bkg_mask])
-                            bkg_interp = False
-                        # if we do use interpolated bkg
+                    # get background from 3 to _i_dev sigma left of peak
+                    lower_bkg = np.logical_and(_mu - _i_dev * _sigma <= _chnnls, _chnnls <= _mu - 3 * _sigma)
+                    # get background from 3 to _i_dev sigma right of peak
+                    upper_bkg = np.logical_and(_mu + 3 * _sigma <= _chnnls, _chnnls <= _mu + _i_dev * _sigma)
+                    # combine bool mask
+                    bkg_mask = np.logical_or(lower_bkg, upper_bkg)
+                    # mask other peaks in bkg so local background fit will not be influenced by nearby peak
+                    bkg_mask[~peak_mask] = False
+                    # do fit; make sure we don't mask at least 2 points
+                    bkg_chnnls = [_chnnls[i] for i in range(len(_chnnls)) if bkg_mask[i]]
+                    bkg_counts = [_cnts[i] for i in range(len(_cnts)) if bkg_mask[i]]
+                    if np.count_nonzero(bkg_mask) > 1:
+                        bkg_opt, bkg_cov = curve_fit(lin, bkg_chnnls, bkg_counts)
+                        bkg_interp = False
+                    # if we do use interpolated bkg
+                    else:
+                        mask = (lower_bkg | upper_bkg)
+                        print(lower_bkg, upper_bkg)
+                        _chnnls_local = [_chnnls[i] for i in range(len(_chnnls)) if mask[i]]
+                        _chnnls_local = np.asarray(_chnnls)[(lower_bkg | upper_bkg)]
+                        #bkg_opt, bkg_cov = curve_fit(lin, _chnnls[(lower_bkg | upper_bkg)],
+                                                     #_bkg(_chnnls[(lower_bkg | upper_bkg)]))
+                        bkg_opt, bkg_cov = curve_fit(lin, np.asarray(_chnnls)[(lower_bkg | upper_bkg)], _bkg(np.asarray(_chnnls)[(lower_bkg | upper_bkg)]))
+                        bkg_interp = True
+                    # find intersections of line and gauss; should be in 3-sigma environment since background is not 0
+                    # increase environment to 5 sigma to be sure
+                    low_lim, high_lim = _mu - 5 * _sigma, _mu + 5 * _sigma
+                    # _chnnls values of current peak
+                    _peak_chnnls = [_chnnl for _chnnl in _chnnls if (low_lim <= _chnnl) & (_chnnl <= high_lim)]
+                    tmp = []
+                    for i in range(len(_chnnls)):
+                        if (low_lim <= _chnnls[i]) & (_chnnls[i] <= high_lim):
+                            tmp.append(_cnts[i])
+                    _peak_cnts = tmp
+                    #_peak_chnnls = _chnnls[(low_lim <= _chnnls) & (_chnnls <= high_lim)]
+                    #_peak_cnts = _cnts[(low_lim <= _chnnls) & (_chnnls <= high_lim)]
+                    # fsolve heavily relies on correct start parameters; estimate from data and loop
+                    try:
+                        _i_tries = 0
+                        found = False
+                        while _i_tries < _MAX_PEAKS:
+                            diff = np.abs(high_lim - low_lim) / _MAX_PEAKS * _i_tries
+
+                            _x0_low = low_lim + diff / 2.
+                            _x0_high = high_lim - diff / 2.
+
+                            # find intersections; needs to be sorted since sometimes higher intersection is found first
+                            _low, _high = sorted(
+                                fsolve(lambda k: tmp_fit(k, *popt) - lin(k, *bkg_opt), x0=[_x0_low, _x0_high]))
+
+                            # if intersections have been found
+                            if not np.isclose(_low, _high) and np.abs(_high - _low) <= 7 * _sigma:
+                                low_lim, high_lim = _low, _high
+                                found = True
+                                break
+
+                            # increment
+                            _i_tries += 1
+
+                        # raise error
+                        if not found:
+                            raise ValueError
+
+                    except (TypeError, ValueError):
+                        msg = 'Intersections between peak and local background for peak(s) %s could not be found.' % ', '.join(
+                            candidates)
+                        if bkg_interp:
+                            msg += ' Use estimates from interpolated background instead.'
+                            _y_low, _y_high = _bkg(_chnnls[lower_bkg]), _bkg(_chnnls[upper_bkg])
                         else:
-                            bkg_opt, bkg_cov = curve_fit(lin, _chnnls[(lower_bkg | upper_bkg)],
-                                                         _bkg(_chnnls[(lower_bkg | upper_bkg)]))
-                            bkg_interp = True
-                        # find intersections of line and gauss; should be in 3-sigma environment since background is not 0
-                        # increase environment to 5 sigma to be sure
-                        low_lim, high_lim = _mu - 5 * _sigma, _mu + 5 * _sigma
-                        # _chnnls values of current peak
-                        _peak_chnnls = _chnnls[(low_lim <= _chnnls) & (_chnnls <= high_lim)]
-                        _peak_cnts = _cnts[(low_lim <= _chnnls) & (_chnnls <= high_lim)]
-                        # fsolve heavily relies on correct start parameters; estimate from data and loop
-                        try:
-                            _i_tries = 0
-                            found = False
-                            while _i_tries < _MAX_PEAKS:
-                                diff = np.abs(high_lim - low_lim) / _MAX_PEAKS * _i_tries
+                            msg += ' Use estimates from data instead.'
+                            _y_low, _y_high = _cnts[lower_bkg], _cnts[upper_bkg]
 
-                                _x0_low = low_lim + diff / 2.
-                                _x0_high = high_lim - diff / 2.
+                        # estimate intersections of background and peak from data
+                        low_lim = _peak_chnnls[np.where(_peak_cnts >= np.mean(_y_low))[0][0]]
+                        high_lim = _peak_chnnls[np.where(_peak_cnts >= np.mean(_y_high))[0][-1]]
+                        logging.info(msg)
 
-                                # find intersections; needs to be sorted since sometimes higher intersection is found first
-                                _low, _high = sorted(
-                                    fsolve(lambda k: tmp_fit(k, *popt) - lin(k, *bkg_opt), x0=[_x0_low, _x0_high]))
+                    # do background integration
+                    (background, background_err) = quad(lin, low_lim, high_lim, args=tuple(bkg_opt))
 
-                                # if intersections have been found
-                                if not np.isclose(_low, _high) and np.abs(_high - _low) <= 7 * _sigma:
-                                    low_lim, high_lim = _low, _high
-                                    found = True
-                                    break
+                # get counts via integration of fit
+                (counts, _)  = quad(tmp_fit, low_lim, high_lim, args=tuple(popt))  # count integration
 
-                                # increment
-                                _i_tries += 1
+                # estimate lower uncertainty limit
+                (counts_low,_) = quad(tmp_fit, low_lim, high_lim, args=tuple(popt - perr))  # lower counts limit
 
-                            # raise error
-                            if not found:
-                                raise ValueError
+                # estimate lower uncertainty limit
+                (counts_high,_) = quad(tmp_fit, low_lim, high_lim, args=tuple(popt + perr))  # lower counts limit
 
-                        except (TypeError, ValueError):
-                            msg = 'Intersections between peak and local background for peak(s) %s could not be found.' % ', '.join(
-                                candidates)
-                            if bkg_interp:
-                                msg += ' Use estimates from interpolated background instead.'
-                                _y_low, _y_high = _bkg(_chnnls[lower_bkg]), _bkg(_chnnls[upper_bkg])
-                            else:
-                                msg += ' Use estimates from data instead.'
-                                _y_low, _y_high = _cnts[lower_bkg], _cnts[upper_bkg]
+                low_count_err, high_count_err = np.abs(counts - counts_low), np.abs(counts_high - counts)
+                max_count_err = high_count_err if high_count_err >= low_count_err else low_count_err
 
-                            # estimate intersections of background and peak from data
-                            low_lim = _peak_chnnls[np.where(_peak_cnts >= np.mean(_y_low))[0][0]]
-                            high_lim = _peak_chnnls[np.where(_peak_cnts >= np.mean(_y_high))[0][-1]]
-                            print(msg)
-                        # do background integration
-                        # do background integration
-                        background, background_err = quad(lin, low_lim, high_lim, args=tuple(bkg_opt))
+                # calc activity and error
+                activity, activity_err = counts - background, np.sqrt(
+                    np.power(max_count_err, 2.) + np.power(background_err, 2.))
 
-                    # get counts via integration of fit
-                    counts = quad(tmp_fit, low_lim, high_lim, args=tuple(popt))  # count integration
+                # scale activity to compensate for dectector inefficiency at given energy
+                if efficiency_cal is not None:
+                    activity, activity_err = (efficiency_cal(popt[0]) * x for x in [activity, activity_err])
 
-                    # estimate lower uncertainty limit
-                    counts_low = quad(tmp_fit, low_lim, high_lim, args=tuple(popt - perr))  # lower counts limit
+                # normalize to counts / s == Bq
+                if t_spec is not None:
+                    activity, activity_err = activity / t_spec, activity_err / t_spec
 
-                    # estimate lower uncertainty limit
-                    counts_high = quad(tmp_fit, low_lim, high_lim, args=tuple(popt + perr))  # lower counts limit
+                # write current results to dict for every candidate
+                for peak_name in candidates:
+                    print(peak_name)
+                    # make entry for current peak
+                    peaks[peak_name] = OrderedDict()
 
-                    low_count_err, high_count_err = np.abs(counts - counts_low), np.abs(counts_high - counts)
+                    # entries for data
+                    peaks[peak_name]['background'] = OrderedDict()
+                    peaks[peak_name]['peak_fit'] = OrderedDict()
+                    peaks[peak_name]['activity'] = OrderedDict()
 
-                    max_count_err = high_count_err if high_count_err >= low_count_err else low_count_err
+                    # write background to result dict
+                    if local_bkg:
+                        peaks[peak_name]['background']['popt'] = bkg_opt.tolist()
+                        peaks[peak_name]['background']['perr'] = np.sqrt(np.diag(bkg_cov)).tolist()
+                    peaks[peak_name]['background']['type'] = 'local' if local_bkg else 'global'
 
-                    # calc activity and error
-                    activity, activity_err = counts - background, np.sqrt(np.power(max_count_err, 2.) + np.power(background_err, 2.))
-
-                    # scale activity to compensate for dectector inefficiency at given energy
+                    # write optimal fit parameters/errors for every peak to result dict
+                    peaks[peak_name]['peak_fit']['popt'] = popt.tolist()
+                    peaks[peak_name]['peak_fit']['perr'] = perr.tolist()
+                    peaks[peak_name]['peak_fit']['int_lims'] = [float(low_lim), float(high_lim)]
+                    peaks[peak_name]['peak_fit']['type'] = peak_fit.__name__
 
 
-                    # write current results to dict for every candidate
-                    for peak_name in candidates:
-                        # make entry for current peak
-                        peaks[peak_name] = OrderedDict()
+                    counter += 1  # increase counter
 
-                        # entries for data
-                        peaks[peak_name]['background'] = OrderedDict()
-                        peaks[peak_name]['peak_fit'] = OrderedDict()
-                        peaks[peak_name]['activity'] = OrderedDict()
+                runtime_counter = 0  # peak(s) were found; reset runtime counter
 
-                print('PEAKS', peaks)
+                # disable fitted region for next iteration
+                #current_mask = (low_lim <= _chnnls) & (_chnnls <= high_lim)
+                current_mask = [True if (low_lim <= _chnnls[i]) & (_chnnls[i] <= high_lim) else False for i in range(len(_chnnls))]
+                peak_mask[current_mask] = peak_mask_fitted[current_mask] = False
 
-
-            peaks = []
-            for idx, y in enumerate(y_find_peaks):
-                mean =  np.mean(y_find_peaks[idx-15:idx+15])
-                if idx<200:
-                    y=y-20
-                if y>mean:
-                    peaks.append([self.energy_values[idx], y])
-            print(peaks)
-            return peaks
+        print([peak for peak in peaks])
+        peaks = []
+        for idx, y in enumerate(y_find_peaks):
+            mean =  np.mean(y_find_peaks[idx-15:idx+15])
+            if idx<200:
+                y=y-20
+            if y>mean:
+                peaks.append([self.energy_values[idx], y])
+        print(peaks)
+        return peaks
 
 
 
