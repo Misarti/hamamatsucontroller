@@ -38,7 +38,7 @@ class NuclideIdentifier:
     def gauss_general(self, x, mu, sigma, n, h):
         return h * np.exp(-np.power((x - mu) / sigma, n))
 
-    def get_activity(self, observed_peaks, probability_peaks=None):
+    def get_activity(self, observed_peaks):
         """
         Method to calculate activity isotope-wise. The peak-wise activities of all peaks of
         each isotope are added and scaled with their respectively summed-up probability
@@ -47,7 +47,7 @@ class NuclideIdentifier:
         probability_peaks = self.nuc_dic_irrad_prob
 
         for peak in observed_peaks:
-            isotope = '_'.join(peak.split('_')[:-1])
+            isotope=peak
             if isotope not in activities:
                 activities[isotope] = OrderedDict([('nominal', 0), ('sigma', 0),
                                                    ('probability', 0), ('unscaled', {'nominal': 0, 'sigma': 0})])
@@ -58,7 +58,7 @@ class NuclideIdentifier:
                 activities[isotope]['unscaled']['nominal'] += observed_peaks[peak]['activity']['nominal']
                 # squared sum in order to get Gaussian error propagation right
                 activities[isotope]['unscaled']['sigma'] += observed_peaks[peak]['activity']['sigma'] ** 2
-                activities[isotope]['probability'] += probability_peaks[peak]
+                activities[isotope]['probability'] += probability_peaks[peak][-1]
 
         for iso in activities:
             try:
@@ -192,7 +192,7 @@ class NuclideIdentifier:
         local_bkg = True
         n_peaks = None
         efficiency_cal = None
-        expected_accuracy = 0.01
+        expected_accuracy = 0.02
         reliable = False
         _chnnls = np.asarray(self.get_energy_values())
 
@@ -213,10 +213,12 @@ class NuclideIdentifier:
 
         y_find_peaks = _cnts - _bkg(_chnnls)
         expected_peaks = {}
+        #BIERZE TYLKO OSTATNI PEAK!!!! NAPRAWIĆ
         for candidate in self.nuc_dic_irrad.keys():
-            for energies in self.nuc_dic_irrad[candidate]:
-                print('ENERGIEs', energies)
-                expected_peaks[candidate] = energies
+            if self.nuc_dic_irrad_prob[candidate]:
+                max_index = np.argmax(self.nuc_dic_irrad_prob[candidate])
+                expected_peaks[candidate] = self.nuc_dic_irrad[candidate][max_index]
+                print(candidate, expected_peaks[candidate])
         filtered = {k: v for k, v in expected_peaks.items() if v != []}
         expected_peaks.clear()
         expected_peaks.update(filtered)
@@ -328,9 +330,9 @@ class NuclideIdentifier:
 
                 # make fit regions in x and y; a little confusing to look at but we need the double indexing to
                 # obtain the same shapes
-                x_fit = [_chnnls[i] for i in range(low, high+1) if peak_mask[i]]
-                y_fit = [_cnts[i] for i in range(low, high+1) if peak_mask[i]]
-                #x_fit, y_fit = _chnnls[low:high][peak_mask[low:high]], _cnts[low:high][peak_mask[low:high]]
+                #x_fit = [_chnnls[i] for i in range(low, high+1) if peak_mask[i]]
+                #y_fit = [_cnts[i] for i in range(low, high+1) if peak_mask[i]]
+                x_fit, y_fit = np.asarray(_chnnls)[low:high][peak_mask[low:high]], np.asarray(_cnts)[low:high][peak_mask[low:high]]
 
                 # check whether we have enough points to fit to
                 if len(x_fit) < 5:  # skip less than 5 data points
@@ -348,7 +350,7 @@ class NuclideIdentifier:
                     while _sigma == 0 and k <= 10:
                         try:
                             sigma_x_fit = [x_fit[i] for i in range(len(x_fit)) if y_fit[i] >= y_peak / k]
-                            _sigma = np.abs(sigma_x_fit[-1] - sigma_x_fit[0]) / 2.3548
+                            _sigma = np.abs(np.asarray(x_fit)[y_fit >= y_peak / k][-1] - np.asarray(x_fit)[y_fit >= y_peak / k][0]) / 2.3548
                         except IndexError:
                             pass
                         finally:
@@ -362,7 +364,6 @@ class NuclideIdentifier:
 
                     # update
                     _mu, _sigma = [popt[fit_args.index(par)] for par in ('mu', 'sigma')]
-                    print( '_mu, sigma', _mu, _sigma)
 
                     # if fitting resulted in nan errors
                     if any(np.isnan(perr)):
@@ -370,10 +371,10 @@ class NuclideIdentifier:
                         print('Fitted resulted in nan errors')
                         continue
 
-                    if any(_mu == peaks[p]['peak_fit']['popt'][0] for p in peaks):
+                    """if any(_mu == peaks[p]['peak_fit']['popt'][0] for p in peaks):
                         logging.debug('Peak at %.2f already fitted. Skipping' % _mu)
                         peak_mask[low:high] = False
-                        continue
+                        continue"""
 
                     # if fit is unreliable
                     if any(np.abs(perr / popt) > 1.0):
@@ -382,14 +383,15 @@ class NuclideIdentifier:
                             logging.warning(
                                 'Unreliable fit for peak at %.2f. Uncertainties larger than 100 percent.' % _mu)
                         else:
+                            print('UNCERTAINTY FOR PEAK', _mu, perr, popt)
                             logging.debug('Skipping fit for peak at %.2f. Uncertainties larger than 100 percent.' % _mu)
                             peak_mask[low:high] = False
                             continue
 
                     #if fit is indistinguishable from background
                     try:
-                        _msk = ((_mu - 10 * _sigma <= _chnnls) & (_chnnls <= _mu - 5 * _sigma)) | \
-                               ((_mu + 5 * _sigma <= _chnnls) & (_chnnls <= _mu + 10 * _sigma))
+                        _msk = ((_mu - 8 * _sigma <= _chnnls) & (_chnnls <= _mu - 6 * _sigma)) | \
+                               ((_mu + 6 * _sigma <= _chnnls) & (_chnnls <= _mu + 8 * _sigma))
                         _msk[~peak_mask_fitted] = False
                         if np.max(_cnts[_msk]) > popt[fit_args.index('h')]:
                             print(np.max(_cnts[_msk]))
@@ -412,6 +414,7 @@ class NuclideIdentifier:
 
                     # make list for potential candidates
                     candidates = []
+                    predictions = []
 
                     # loop over all expected peaks and check which check out as expected within the accuracy
                     for ep in expected_peaks:
@@ -421,12 +424,12 @@ class NuclideIdentifier:
                         lower_est, upper_est = [(1 + sgn * expected_accuracy) * expected_peaks[ep] for sgn in (-1, 1)]
                         if ep == 'Cs-137':
                             print(ep, 'LOWER MU UPPER', lower_est, _mu, upper_est)
-                        if ep == "Co-60":
-                            print('CANDIDATES', candidates)
+                        if ep == 'Co-60':
+                            print(ep, 'LOWER MU UPPER', lower_est, _mu, upper_est)
                         # if current peak checks out set peak name and break
                         if lower_est <= _mu <= upper_est:
                             candidates.append(ep)
-                            print('CANDIDATES', candidates)
+                            predictions.append([ep, expected_peaks[ep], _mu])
 
                     # if no candidates are found, current peak was not expected
                     if not candidates:
@@ -500,14 +503,14 @@ class NuclideIdentifier:
                     # increase environment to 5 sigma to be sure
                     low_lim, high_lim = _mu - 5 * _sigma, _mu + 5 * _sigma
                     # _chnnls values of current peak
-                    _peak_chnnls = [_chnnl for _chnnl in _chnnls if (low_lim <= _chnnl) & (_chnnl <= high_lim)]
+                    """_peak_chnnls = [_chnnl for _chnnl in _chnnls if (low_lim <= _chnnl) & (_chnnl <= high_lim)]
                     tmp = []
                     for i in range(len(_chnnls)):
                         if (low_lim <= _chnnls[i]) & (_chnnls[i] <= high_lim):
                             tmp.append(_cnts[i])
-                    _peak_cnts = tmp
-                    #_peak_chnnls = _chnnls[(low_lim <= _chnnls) & (_chnnls <= high_lim)]
-                    #_peak_cnts = _cnts[(low_lim <= _chnnls) & (_chnnls <= high_lim)]
+                    _peak_cnts = tmp"""
+                    _peak_chnnls = np.asarray(_chnnls)[(low_lim <= _chnnls) & (_chnnls <= high_lim)]
+                    _peak_cnts = np.asarray(_cnts)[(low_lim <= _chnnls) & (_chnnls <= high_lim)]
                     # fsolve heavily relies on correct start parameters; estimate from data and loop
                     try:
                         _i_tries = 0
@@ -520,7 +523,7 @@ class NuclideIdentifier:
 
                             # find intersections; needs to be sorted since sometimes higher intersection is found first
                             _low, _high = sorted(
-                                fsolve(lambda k: tmp_fit(k, *popt) - lin(k, *bkg_opt), x0=[_x0_low, _x0_high]))
+                                fsolve(lambda k: tmp_fit(k, *popt) - lin(k, *bkg_opt), x0=np.asarray([_x0_low, _x0_high])))
 
                             # if intersections have been found
                             if not np.isclose(_low, _high) and np.abs(_high - _low) <= 7 * _sigma:
@@ -550,24 +553,6 @@ class NuclideIdentifier:
                         high_lim = _peak_chnnls[np.where(_peak_cnts >= np.mean(_y_high))[0][-1]]
                         logging.info(msg)
 
-                    # do background integration
-                    (background, background_err) = quad(lin, low_lim, high_lim, args=tuple(bkg_opt))
-
-                # get counts via integration of fit
-                (counts, _)  = quad(tmp_fit, low_lim, high_lim, args=tuple(popt))  # count integration
-
-                # estimate lower uncertainty limit
-                (counts_low,_) = quad(tmp_fit, low_lim, high_lim, args=tuple(popt - perr))  # lower counts limit
-
-                # estimate lower uncertainty limit
-                (counts_high,_) = quad(tmp_fit, low_lim, high_lim, args=tuple(popt + perr))  # lower counts limit
-
-                low_count_err, high_count_err = np.abs(counts - counts_low), np.abs(counts_high - counts)
-                max_count_err = high_count_err if high_count_err >= low_count_err else low_count_err
-
-                # calc activity and error
-                activity, activity_err = counts - background, np.sqrt(
-                    np.power(max_count_err, 2.) + np.power(background_err, 2.))
 
                 # scale activity to compensate for dectector inefficiency at given energy
                 if efficiency_cal is not None:
@@ -576,35 +561,18 @@ class NuclideIdentifier:
                 # normalize to counts / s == Bq
                 if t_spec is not None:
                     activity, activity_err = activity / t_spec, activity_err / t_spec
+                probability_peaks = self.nuc_dic_irrad_prob
 
                 # write current results to dict for every candidate
                 for peak_name in candidates:
                     print(peak_name)
                     # make entry for current peak
-                    peaks[peak_name] = OrderedDict()
+                    peaks[peak_name] = popt.tolist()[0], expected_peaks[peak_name], max(probability_peaks[peak_name])
+
 
                     # entries for data
-                    peaks[peak_name]['background'] = OrderedDict()
-                    peaks[peak_name]['peak_fit'] = OrderedDict()
-                    peaks[peak_name]['activity'] = OrderedDict()
 
                     # write background to result dict
-                    if local_bkg:
-                        peaks[peak_name]['background']['popt'] = bkg_opt.tolist()
-                        peaks[peak_name]['background']['perr'] = np.sqrt(np.diag(bkg_cov)).tolist()
-                    peaks[peak_name]['background']['type'] = 'local' if local_bkg else 'global'
-
-                    # write optimal fit parameters/errors for every peak to result dict
-                    peaks[peak_name]['peak_fit']['popt'] = popt.tolist()
-                    peaks[peak_name]['peak_fit']['perr'] = perr.tolist()
-                    peaks[peak_name]['peak_fit']['int_lims'] = [float(low_lim), float(high_lim)]
-                    peaks[peak_name]['peak_fit']['type'] = peak_fit.__name__
-
-                    peaks[peak_name]['activity']['nominal'] = float(activity)
-                    peaks[peak_name]['activity']['sigma'] = float(activity_err)
-                    peaks[peak_name]['activity']['type'] = 'integrated' if t_spec is None else 'normalized'
-                    peaks[peak_name]['activity']['unit'] = 'becquerel' if t_spec is not None else 'counts / t_spec'
-                    peaks[peak_name]['activity']['calibrated'] = efficiency_cal is not None
 
 
                     counter += 1  # increase counter
@@ -615,12 +583,12 @@ class NuclideIdentifier:
                 #current_mask = (low_lim <= _chnnls) & (_chnnls <= high_lim)
                 current_mask = [True if (low_lim <= _chnnls[i]) & (_chnnls[i] <= high_lim) else False for i in range(len(_chnnls))]
                 peak_mask[current_mask] = peak_mask_fitted[current_mask] = False
-        activities = self.get_activity(peaks)
-        print(activities)
 
-        for peak in peaks:
-            print(peak)
-            print(peaks[peak]['peak_fit']['popt'][0])
+       #activities = self.get_activity(peaks)
+
+        #peaks[peak_name]['activity']= activities[peak_name]
+
+        print(peaks)
         peaks = []
         for idx, y in enumerate(y_find_peaks):
             mean =  np.mean(y_find_peaks[idx-15:idx+15])
