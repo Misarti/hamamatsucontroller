@@ -24,8 +24,6 @@ class NuclideIdentifier:
         #self.peaks = self.find_peaks()
         self.database_array, self.database_dict, self.nuc_dic_irrad, self.nuc_dic_irrad_prob = self.get_database()
         self.peaks = self.interpolate_bkg(self.sample)
-        self.identify_nuclide()
-
     def get_energy_values(self):
         file_path =  "../res/gf_C12137_2.csv"
         energy_values = []
@@ -38,39 +36,21 @@ class NuclideIdentifier:
     def gauss_general(self, x, mu, sigma, n, h):
         return h * np.exp(-np.power((x - mu) / sigma, n))
 
-    def get_activity(self, observed_peaks):
-        """
-        Method to calculate activity isotope-wise. The peak-wise activities of all peaks of
-        each isotope are added and scaled with their respectively summed-up probability
-        """
-        activities = OrderedDict()
-        probability_peaks = self.nuc_dic_irrad_prob
+    def most_prob(self, observed_peaks):
+        only_obs_peaks = list(set([observed_peaks[candidate][0] for candidate in observed_peaks.keys()]))
+        most_prob = {}
+        for peak in only_obs_peaks:
+            candidates = []
+            probabilities = []
+            for candidate in observed_peaks.keys():
+                if observed_peaks[candidate][0] == peak:
+                    candidates.append(candidate)
+                    probabilities.append(observed_peaks[candidate][2])
+            result_list = [ (p, c) for p, c in reversed(sorted(zip(probabilities, candidates)))]
+            most_prob[peak]=result_list
+        print(most_prob)
 
-        for peak in observed_peaks:
-            isotope=peak
-            if isotope not in activities:
-                activities[isotope] = OrderedDict([('nominal', 0), ('sigma', 0),
-                                                   ('probability', 0), ('unscaled', {'nominal': 0, 'sigma': 0})])
-                activities[isotope]['unscaled']['nominal'] = 0
 
-            if peak in probability_peaks:
-                print('PROBABILITY', probability_peaks[peak])
-                activities[isotope]['unscaled']['nominal'] += observed_peaks[peak]['activity']['nominal']
-                # squared sum in order to get Gaussian error propagation right
-                activities[isotope]['unscaled']['sigma'] += observed_peaks[peak]['activity']['sigma'] ** 2
-                activities[isotope]['probability'] += probability_peaks[peak][-1]
-
-        for iso in activities:
-            try:
-                activities[iso]['nominal'] = activities[iso]['unscaled']['nominal'] * 1. / activities[iso]['probability']
-                # square root of sum of squared sigmas in order to get Gaussian error propagation right
-                activities[iso]['sigma'] = activities[iso]['unscaled']['sigma'] ** 0.5 * 1. / activities[iso]['probability']
-
-            # when no probability given
-            except ZeroDivisionError:
-                pass
-
-        return activities
 
     def interpolate_bkg(self, counts, channels=None, window=5, order=3, scale=0.5, energy_cal=None):
         """
@@ -183,7 +163,7 @@ class NuclideIdentifier:
         _MAX_PEAKS = 100
 
         # result dict
-        peaks = OrderedDict()
+        peaks = {}
         t_spec = None
         peak_fit = gauss
         ch_sigma = 5
@@ -414,7 +394,6 @@ class NuclideIdentifier:
 
                     # make list for potential candidates
                     candidates = []
-                    predictions = []
 
                     # loop over all expected peaks and check which check out as expected within the accuracy
                     for ep in expected_peaks:
@@ -429,7 +408,6 @@ class NuclideIdentifier:
                         # if current peak checks out set peak name and break
                         if lower_est <= _mu <= upper_est:
                             candidates.append(ep)
-                            predictions.append([ep, expected_peaks[ep], _mu])
 
                     # if no candidates are found, current peak was not expected
                     if not candidates:
@@ -589,14 +567,7 @@ class NuclideIdentifier:
         #peaks[peak_name]['activity']= activities[peak_name]
 
         print(peaks)
-        peaks = []
-        for idx, y in enumerate(y_find_peaks):
-            mean =  np.mean(y_find_peaks[idx-15:idx+15])
-            if idx<200:
-                y=y-20
-            if y>mean:
-                peaks.append([self.energy_values[idx], y])
-        print(peaks)
+        self.most_prob(peaks)
         return peaks
 
 
@@ -708,7 +679,6 @@ class NuclideIdentifier:
         print(candidates)
         print(len(candidates), candidates.index('Cs-137'), candidates.index('Co-60'))
         print(intensities)
-        print(self.check_candidate('Co-60'))
 
 
 
