@@ -1,8 +1,12 @@
 import ctypes
 import os
 import random
+import datetime
 from os import path
-from scipy.signal import argrelmax, find_peaks
+import json
+#from scipy.signal import argrelmax, find_peaks
+from class_factory import Spectrometer, EnergyCountPair
+import requests
 import coloredlogs, logging
 from dataclasses import dataclass
 from dataclasses_json import dataclass_json
@@ -193,28 +197,25 @@ class RdmUsbModule:
             self.sievert_per_sec()
             self.sievert = 0
 
-    def find_peaks(self):
-        #peaks = find_peaks(self.histogram)
-        peaks = argrelmax(self.histogram, order=50, mode='clip')
-        n_peaks = len(peaks)
-        print(n_peaks)
-        for peak in peaks:
-            peak_energy = [self.log_listX[p] for p in peak]
-        peak_energy_path = path.abspath("./res/peaks.csv")
-        with open(peak_energy_path, 'w') as f:
-            writer = csv.writer(f)
-            # write a row to the csv file
-            writer.writerow(peak_energy)
 
-    def save_measurements(self):
-        script_path = Path(__file__).parent.parent.absolute()
-        filename = f'meas.txt'
-        file_path = Path(script_path, 'res', filename).resolve()
+
+    def save_measurements(self, isotope, source, number):
+        script_path = Path(__file__).parent.absolute()
+        filename = f'{isotope}_{source}_{number}.txt'
+        print(script_path)
+        file_path = Path(script_path, 'res', 'march',  filename).resolve()
+        print(file_path)
         with open(file_path, 'w') as f:
+            list = []
             for i in range(len(self.log_listX)):
+                list.append(EnergyCountPair(self.log_listX[i],self.histogram[i]))
                 f.writelines(str(self.log_listX[i])+'\t')
                 f.write(str(self.histogram[i]))
                 f.write('\n')
+       #requests.post(url = "http://localhost:8000/spectrometer", json=json.loads(Spectrometer("e422fda1-1976-4243-a690-63d355cc92bc", datetime.datetime.now(), 0.0, 0.0, counts_per_energy = list,
+                                                                                    #identified_nuclides = list, scenario=" ").to_json()))
+        print("finished!")
+
 
 
 

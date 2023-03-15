@@ -1,19 +1,20 @@
 
-#from rdm_usb import RdmUsbModule
-from find_nuclide import NuclideIdentifier
+from rdm_usb import RdmUsbModule
 import time
-import os
-import json
-import numpy as np
-from pathlib import Path
+
 
 
 if __name__ == "__main__":
-    n = NuclideIdentifier()
-    #rdm = RdmUsbModule()
-    for i in range(1000):
-        #rdm.get_dac()
+
+    rdm = RdmUsbModule()
+    timeout = time.time() + 300 * 1
+    while time.time() <= timeout:
+        #print(timeout - time.time())
+        rdm.get_dac()
         time.sleep(0.1)
-    #rdm.save_measurements()
-    #rdm.find_peaks()
+    isotope = 'Unknown_source'
+
+    source = 'close_strong'
+    number = '11'
+    rdm.save_measurements(isotope, source, number)
 
